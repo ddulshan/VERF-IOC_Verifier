@@ -1,0 +1,1 @@
+#Add IOC here. One per each line. Hashes, Domains and IPs
