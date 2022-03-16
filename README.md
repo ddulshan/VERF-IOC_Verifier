@@ -1,7 +1,7 @@
 # IOC-Verifier
 Powershell based script to Verify malware Indicators of Compromise (IOC Hashes, domains, IPs) against databases such as VirusTotal and Kaspersky
 
-Register and following sites and get API keys. Put these keys in the mentioned spaces within the single quotes in the script. VirusTotal support multiple API keys to bypass daily/monthly limits.
+Following are the currently supported services. Register and get API keys.
 - https://www.virustotal.com/
 - https://opentip.kaspersky.com/
 - https://www.abuseipdb.com/
