@@ -80,7 +80,7 @@ $virustotal_keys = @(
 ```
 
 ### API Rate limiting
-Some services has a limit on how man requests can be performed at a given time with public/free keys. This can be bypassed with the multiple key support feature. But if you dont want to be bothered with creating multiple accounts and don't mind waiting the extra time the rate limiting feature can be enabled. This is Enabled by default. See: [Configurable Settings:6](#configurable-settings)
+Some services has a limit on how man requests can be performed at a given time with public/free keys. This can be bypassed with the multiple key support feature. But if you dont want to be bothered with creating multiple accounts and don't mind waiting the extra time the rate limiting feature can be enabled. This is Disabled by default. See: [Configurable Settings:6](#configurable-settings)
 
 Currently supported service limitation on free keys:
 - VirusTotal: 4/minute, 500/day
