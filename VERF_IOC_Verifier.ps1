@@ -1,21 +1,64 @@
-<#
-    
-	VERF - IOC Verifier
-    Version : 1.0
-    Creator : Dunura Dulshan | https://github.com/ddulshan
+﻿<#
+    VERF - IOC Verifier
+    Version : 1.1
+    Creator : Dunura Dulshan | | https://github.com/ddulshan
     Description : Script to call Malware databases such as VirusTotal, Kaspersky and AbuseIPDB API for information on given query
-   
 #>
 
+# Configurable Settings
+$ioc_file = '.\ioc.txt'
+$temp_cache_file = '.\VERF_Temp_Cache'
+$debug_platform = 0 #0-debug off, 1-VT, 2-Kasper, 3-Intezer, 4-AbuseIPDB
+$abuseipdb_max_comments = 8
+$temp_cache_check = $true
+$api_rate_limit = $false
+$virustotal_timeout = 17
+$filter_words = @('www.', '[', ']', 'http://', 'https://', 'hxxp://', 'hxxps://')
+
+<# API KEYS
+	Multiple keys supported. ie:
+		
+		$virustotal_keys = @(
+			'XXXXX',
+			'XXXXX',
+			'XXXXX'
+		)
+#>
+$virustotal_keys = @(
+    ''
+)
+$kaspersky_keys = @(
+    ''
+)
+$abuseipdb_keys = @(
+    ''
+)
+$intezer_keys = @(
+    ''
+)
+
+# Runtime Variables
+$global:virustotal_current_key = 0
+$global:kaspersky_current_key = 0
+$global:absueipdb_current_key = 0
+$global:intezer_current_key = 0
+$global:current_filename = ''
+$virustotal_key_exhausted = $false
+$kaspersky_key_exhausted = $false
+$intezer_key_exhausted = $false
+$abuseipdb_key_exhausted = $false
+
 # API URLs
-$virustotal_url = "https://www.virustotal.com/api/v3/"   #ip_addresses, domains, hashes
-$kaspersky_url = "https://opentip.kaspersky.com/api/v1/search/" #hash?request=<hash>
+$virustotal_url = "https://www.virustotal.com/api/v3/"
+$kaspersky_url = "https://opentip.kaspersky.com/api/v1/search/"
 $abuseipdb_url = "https://api.abuseipdb.com/api/v2/check"
+$intezer_url = 'https://analyze.intezer.com/api/v2-0'
 
 # Platform Dictionary
 $platforms = @{
     1 = 'VirusTotal'
     2 = 'Kaspersky'
+    3 = 'Intezer'
     4 = 'AbuseIPDB'
 }
 
@@ -31,9 +74,8 @@ $kaspersky_url_type = @{
     'domain' = 'domain'
 }
 
-# Words and characters to remove/split in filtering process
-$filter_words = @('www.', '[', ']', 'http://', 'https://', 'hxxp://', 'hxxps://')
-$split_chars = @('/', ':')
+# Whitelisted signature list
+$sig_whitelist = @('Microsoft Corporation')
 
 # IOC Information class
 class query_class {
@@ -58,37 +100,6 @@ class query_class {
     }
 }
 
-# Other Settings
-$ioc_file = '.\ioc.txt'
-$temp_cache_file = '.\temp_cache'
-$debug_platform = 0 #0-debuf off, 1-VT, 2-Kasper, 4-AbuseIPDB
-$abuseipdb_max_comments = 8
-$temp_cache_check = $true
-$global:virustotal_current_key = 0
-$global:kaspersky_current_key = 0
-$global:absueipdb_current_key = 0
-$global:current_filename = ''
-#$virustotal_timeout = 17 #For VirusTotal query limit. 4/minute, 500/day
-
-<# API KEYS
-	Multiple keys supported. Comma ',' seperated. ie:
-		
-		$virustotal_keys = @(
-			'XXXXX',
-			'XXXXX',
-			'XXXXX'
-		)
-#>
-$virustotal_keys = @(
-    '!!!!!!ADD VIRUSTOTAL API KEYS HERE!!!!!'
-)
-$kaspersky_keys = @(
-    '!!!!!!ADD Kaspersky API KEYS HERE!!!!!' 
-)
-$abuseipdb_keys = @(
-    '!!!!!!ADD AbuseIPDB API KEYS HERE!!!!!'
-)
-
 # Request Headers
 $virustotal_headers = @{
     'x-apikey' = $virustotal_keys[$virustotal_current_key]
@@ -99,6 +110,10 @@ $kaspersky_headers = @{
 $abuseipdb_headers = @{
     'Key' = $abuseipdb_keys[$absueipdb_current_key]
 }
+$intezer_headers = @{
+    'Authorization' = ''
+}
+
 
 # Request Bodies
 $abuseipdb_body = @{
@@ -109,22 +124,22 @@ $abuseipdb_body = @{
 $kaspersky_body = @{
     'request' = ""
 }
+$intezer_body = @{
+    'api_key' = ''+$intezer_keys[$intezer_current_key]
+}
 
-# Regex
+
+# Regex for IOC identification
 [regex]$regex_ipv4 = '\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
 [regex]$regex_sha1 = '\b([a-f0-9]{40})\b'
 [regex]$regex_sha256 = '\b[a-f0-9]{64}\b'
-[regex]$regex_md5 = '\b[a-f0-9]{32}\b'
-[regex]$regex_domain = '([a-z0-9]+\.)*[a-z0-9]+\.[a-z]+'
+[regex]$regex_md5 = '\b[0-9a-fA-F]{32}\b'
+[regex]$regex_domain = '([a-z0-9-]+\.)*[a-z0-9-]+\.[a-z]+'
 [regex]$regex_selectURL = '^(\/(.*))'
 [regex]$regex_hash = '((?<!FIRSTBYTES:\s)|[\b\s]|^)([0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})(\b|$)'
 
 
-function WriteCSV() {
-    param (
-         $query_info,
-         $verbose = $true
-     )
+function WriteCSV($query_info, $verbose = $true) {
 
     ForEach($type in $query_info.detection_type) {
         $detection_type_str += ("$type`n")
@@ -160,6 +175,7 @@ function WriteCSV() {
     if($verbose) {
         OutputHandler ("[$] [" + ($query_info.platform) + "] [" + $query_info.ioc_type + $query_info.hash_type + "] " + $query_info.query + "`t" + $query_info.rating +"`t" + $query_info.detection_type[0])
     }
+    Write-Host ''
     
     if($temp_cache_check) {
         Add-Content -Path $temp_cache_file -Value $query_info.query
@@ -167,12 +183,9 @@ function WriteCSV() {
 }
 
 
-function OutputHandler($message, $type) {
+function OutputHandler($message, $type=0) {
     switch ($type) {
-        1 { $output = ("[!] [" + $message.platform + "] Quota Exceeded [!] : " + $message.query); break }
-        2 { $output = ("[!] [" + $message.platform + "] [" + $message.ioc_type + "] " + $message.query + ": " + $message.rating + ", checking other platforms..."); break }
-        3 { $output = ("[!] [" + $message.platform + "] Bad request [!] : " + $message.query); break }
-        4 { $output = ("[?] Invalid IOC: " + $message.query);break }
+        2 { $output = ("[!] [" + $message.platform + "] [" + $message.ioc_type + $message.hash_type + "] " + $message.query + ": " + $message.rating + ", checking other platforms..."); break }
         Default { $output = $message }
     }
     $output | Out-File -FilePath .\log.txt -Append
@@ -180,273 +193,372 @@ function OutputHandler($message, $type) {
 }
 
 
-function Kaspersky-Check($query_info) {
-    $query_info.platform = 'Kaspersky'
-    $query_info.link = ("https://opentip.kaspersky.com/" + $query_info.query)
-    $kaspersky_body.request = $query_info.query
-    
-    try {
-        $response = Invoke-RestMethod -Uri ($kaspersky_url + $kaspersky_url_type.($query_info.ioc_type)) -Headers $kaspersky_headers -Body $kaspersky_body
-
-        if($query_info.ioc_type -ne 'hash') {
-            if($response.Zone -eq 'Red') {
-                $query_info.rating = 'Malicious'
-            }
-            elseif($response.Zone -eq 'Green') {
-                $query_info.rating = 'Clean'
-            }
-            elseif($response.Zone -eq 'Grey') {
-                $query_info.rating = 'Unknown'
-            }
-        }
-        
-        else {
-            $query_info.rating = $response.FileGeneralInfo.FileStatus
-        }
-        
-        $query_info.first_seen = $response.FileGeneralInfo.FirstSeen
-        $query_info.last_seen = $response.FileGeneralInfo.LastSeen
-        
-        if($response.FileGeneralInfo.Signer -eq "Microsoft Corporation") {
-            $query_info.comments = "Microsoft Corporation. All rights reserved."
-        }
-
-        ForEach($detection in $response.DetectionsInfo) {
-            if($query_info.detection_type[0] -eq '-') {
-                $query_info.detection_type[0] = $detection.DetectionName
-            }
-            else {
-                [void]$query_info.detection_type.Add($detection.DetectionName)
-            }
-        }
-        
-        if($query_info.detection_type[0] -ne '-') {
-            $query_info.reports = 100
-        }
-
-        WriteCSV $query_info
-    }
-    catch {
-        if($_.Exception.Response.StatusCode.Value__ -eq 403 -or $_.Exception.Response.StatusCode.Value__ -eq 429) {
-            OutputHandler $query_info 1
-            if((API-Toggle 2)) {
-                Kaspersky-Check $query_info
-                return
-            }
-        }
-        elseif($_.Exception.Response.StatusCode.Value__ -eq 404 -or $response -eq '') {
-            OutputHandler ("[!] [Kaspersky] Not found [!] : " + $query_info.query)
-        }
-        elseif($_.Exception.Response.StatusCode.Value__ -eq 400) {
-            OutputHandler $query_info 3
-        }
-        else {
-            OutputHandler ("[!] [Kaspersky] Error " + $_.Exception.Response.StatusCode.Value__ + "[!] : " + $query_info.query)
-            OutputHandler $_.Exception
-        }
-        
-        Fallback-Platform $query_info
-    }
-}
-
-
-function AbuseIPDB-Check($query_info) {
-    $query_info.platform = 'AbuseIPDB'
-    $link = "https://www.abuseipdb.com/check/$query"
-    $count_comments = 0
-    $comment = '-'
-    $abuseipdb_body.ipAddress = $query_info.query
-
-    try {
-        $response = Invoke-RestMethod -Uri $abuseipdb_url -Body $abuseipdb_body -Headers $abuseipdb_headers
-
-        $whitelisted = $response.data.isWhitelisted
-        $confidence_score = $response.data.abuseConfidenceScore
-        $total_reports = $response.data.totalReports
-        $query_info.last_seen = $response.data.lastReportedAt
-        $isp = $response.data.isp
-        $domain = $response.data.domain
-        $usage_type = $response.data.usageType
-
-        if($total_reports -eq 0 -and $confidence_score -eq 0) {
-            $query_info.rating = 'Clean'
-            OutputHandler $query_info 2
-            Fallback-Platform $query_info
-            return
-        }
-        elseif($total_reports -le 3 -and $confidence_score -le 10) {
-            $query_info.rating = 'Suspicious'
-        }
-        elseif($total_reports -gt 3 -or $confidence_score -gt 10) {
-            $query_info.rating = 'Malicious'
-        }
-        else {
-            $query_info.rating = 'Unknown'
-            OutputHandler $query_info 2
-            Fallback-Platform $query_info
-            return
-        }
-    
-        ForEach($report in $response.data.reports) {
-            if($count_comments -ge $abuseipdb_max_comments) {
-                continue
-            }
-            $query_info.comments += ($report.comment + "`n")
-            $count_comments += 1
-        }
-
-        WriteCSV $query_info
-    }
-    catch {
-        OutputHandler ("[!] [AbuseIPDB] Error [!] : " + $query_info.query)
-        OutputHandler $_.Exception
-        Fallback-Platform $query_info
-    }
-}
-
-
 function Fallback-Platform($query_info) {
     if($debug_platform -ne 0) {
+        WriteCSV $query_info
         return
     }
-
+    
     if($query_info.platform -eq $platforms.1) {
         if($query_info.ioc_type -eq 'ip') {
             AbuseIPDB-Check $query_info
         }
         elseif($query_info.ioc_type -eq 'hash' -or $query_info.ioc_type -eq 'domain') {
+            
             Kaspersky-Check $query_info
+            
         }
     }
     elseif($query_info.platform -eq $platforms.2) {
-        if($query_info.ioc_type -eq 'domain') {
-            AbuseIPDB-Check $query_info
+        if($query_info.ioc_type -eq 'hash') {
+            Intezer-Check $query_info
         }
         else {
-            WriteCSV $query_info
+            WriteCSV $query_info $false
         }
+    }
+    elseif($query_info.platform -eq $platforms.3) {
+        WriteCSV $query_info $false
     }
     elseif($query_info.platform -eq $platforms.4) {
         if($query_info.ioc_type -eq 'domain') {
-            WriteCSV $query_info
+            WriteCSV $query_info $false
         }
         else {
             Kaspersky-Check $query_info
         }
     }
     else {
-        $query_info.comments = "UNKNOWN"
-        WriteCSV $query_info
+        WriteCSV $query_info $false
     }
 }
 
 
-function API-Toggle($platform) {
+function Update-IntezerToken {
+    try {
+        $token = (Invoke-RestMethod -Method "POST" -Uri ($intezer_url + '/get-access-token') -Body ($intezer_body | ConvertTo-Json) -ContentType "application/json").result
+        $intezer_headers['Authorization'] = 'Bearer ' + $token
+        OutputHandler ("[!] [" + $platforms.$platform + "] JWT Updated`n")
+        return $true
+    }
+    catch {
+        OutputHandler ("[?] [" + $platforms.$platform + "] Error retrieving JWT")
+        return $false
+    }
+}
+
+
+function Toggle-APIKey($platform) {
+    $keys = ''
+    $current_key = ''
+    $key_hashtable = ''
+    $key_value = ''
+    $key_exhausted = ''
     
-    if($platform -eq 1) {
-        if($virustotal_keys.Count -gt ($virustotal_current_key + 1)) {
-            $global:virustotal_current_key += 1
-            $virustotal_headers.'x-apikey' = $virustotal_keys[$virustotal_current_key]
-            OutputHandler "[!] [VirusTotal] Key Changed [!]"
-            return $true
-        }
-        elseif($virustotal_keys.Count -le ($virustotal_current_key + 1)) {
-            OutputHandler "[!] [VirusTotal] All keys exhausted [!]"
-        }
+    switch ($platform) {
+        1 { $keys = $virustotal_keys; $current_key = ([ref]$virustotal_current_key); $key_hashtable = $virustotal_headers; $key_value = 'x-apikey'; $key_exhausted = ([ref]$virustotal_key_exhausted); break }
+        2 { $keys = $kaspersky_keys; $current_key = ([ref]$kaspersky_current_key); $key_hashtable = $kaspersky_headers; $key_value = 'x-api-key'; $key_exhausted = ([ref]$kaspersky_key_exhausted); break }
+        3 { $keys = $intezer_keys; $current_key = ([ref]$intezer_current_key); $key_hashtable = $intezer_body; $key_value = 'api_key'; $key_exhausted = ([ref]$intezer_key_exhausted); break }
+        4 { $keys = $abuseipdb_keys; $current_key = ([ref]$absueipdb_current_key); $key_hashtable = $abuseipdb_headers; $key_value = 'Key'; $key_exhausted = ([ref]$abuseipdb_key_exhausted); break }
+        Default { break }
     }
-    elseif($platform -eq 2) {
-        if($kaspersky_keys.Count -gt ($kaspersky_current_key + 1)) {
-            $global:kaspersky_current_key += 1
-            $kaspersky_headers.'x-api-key' = $kaspersky_keys[$kaspersky_current_key]
-            OutputHandler "[!] [Kaspersky] Key Changed [!]"
-            return $true
+
+    if($keys.Count -gt ($current_key.Value + 1)) {
+        $current_key.Value += 1
+        $key_hashtable.$key_value = $keys[$current_key.Value]
+        OutputHandler ("[!] [" + $platforms.$platform + "] Key Changed`n")
+        if($platform -eq 3) {
+            [void](Update-IntezerToken)
         }
-        elseif($virustotal_keys.Count -le ($virustotal_current_key + 1)) {
-            OutputHandler "[!] [Kaspersky] All keys exhausted [!]"
-        }
+
+        return $true
     }
+    elseif($keys.Count -le ($current_key.Value + 1)) {
+        $key_exhausted.Value = $true
+        OutputHandler ("[!] [" + $platforms.$platform + "] All keys exhausted`n")
+    }
+
     return $false
+}
+
+
+function API-Request($query_info) {
+    $platform = $platforms.GetEnumerator().Where({$_.Value -eq $query_info.platform}).Name
+    
+    do {
+        try {
+            if ($platform -eq 1) {
+                if($virustotal_keys[$virustotal_current_key] -eq '' -or $virustotal_key_exhausted) {
+                    break
+                }
+                $response = Invoke-RestMethod -Uri ($virustotal_url + $virustotal_url_type.($query_info.ioc_type) + $query_info.query) -Headers $virustotal_headers
+                if($api_rate_limit) {
+                    Start-Sleep -s $virustotal_timeout
+                }
+            }
+            elseif ($platform -eq 2) {
+                if($kaspersky_keys[$kaspersky_current_key] -eq '' -or $kaspersky_key_exhausted) {
+                    
+                    break
+                }
+                $response = Invoke-RestMethod -Uri ($kaspersky_url + $kaspersky_url_type.($query_info.ioc_type)) -Headers $kaspersky_headers -Body $kaspersky_body
+            }
+            elseif ($platform -eq 3) {
+                
+                if($intezer_keys[$intezer_current_key] -eq ''  -or $intezer_key_exhausted) {
+                    break
+                }
+                if($intezer_headers['Authorization'] -eq '') {
+                    if(!(Update-IntezerToken)) {
+                        if((Toggle-APIKey $platform)) {
+                            continue
+                        }
+                        break
+                    }
+                }
+                $response = Invoke-RestMethod -Uri ($intezer_url + '/files/' + $query_info.query) -Headers $intezer_headers
+            }
+            elseif ($platform -eq 4) {
+                if($abuseipdb_keys[$absueipdb_current_key] -eq ''  -or $abuseipdb_key_exhausted) {
+                    break
+                }
+                $response = Invoke-RestMethod -Uri $abuseipdb_url -Body $abuseipdb_body -Headers $abuseipdb_headers
+            }
+
+            return $response
+        }
+        catch {
+            if($_.Exception.Response.StatusCode.Value__ -eq 404 -or $_.Exception.Response.StatusCode.Value__ -eq 410) {
+                OutputHandler ("[!] [" + $query_info.platform + "] [" + $query_info.ioc_type + $query_info.hash_type + "] Not Found : " + $query_info.query)
+                break
+            }
+            elseif($_.Exception.Response.StatusCode.Value__ -eq 401) {
+                OutputHandler ("[!] [" + $query_info.platform + "] Invalid or Expired Token")
+                if(Update-IntezerToken) {
+                    continue
+                }
+                else {
+                    if((Toggle-APIKey $platform)) {
+                        continue
+                    }
+                    break
+                }
+            }
+            elseif($_.Exception.Response.StatusCode.Value__ -eq 400) {
+                OutputHandler ("[!] [" + $query_info.platform + "] [" + $query_info.ioc_type + $query_info.hash_type + "] Bad request : " + $query_info.query)
+                break
+            }
+            elseif($_.Exception.Response.StatusCode.Value__ -eq 429 -or $_.Exception.Response.StatusCode.Value__ -eq 403) {
+                OutputHandler ("[!] [" + $query_info.platform + "] [" + $query_info.ioc_type + $query_info.hash_type + "] Quota Exceeded, toggling keys... : ")
+                if((Toggle-APIKey $platform)) {
+                    continue
+                }
+                break
+            }
+            else {
+                OutputHandler ("[?] [" + $query_info.platform + "] Error " + $_.Exception.Response.StatusCode.Value__ + " : " + $query_info.query)
+                OutputHandler ("[?] Check network connection, trying again...")
+                Start-Sleep -s 5
+                continue
+            }
+        }
+    } while (1)
+    
+    Fallback-Platform $query_info
+
+    return $false
+}
+
+
+function Intezer-Check($query_info) {
+    $query_info.platform = 'Intezer'
+    
+    $response = API-Request($query_info)
+    if(!$response) {
+        return
+    }
+
+    if($response.status -eq 'succeeded') {
+        $query_info.rating = $response.result.verdict
+        $query_info.link = $response.result.analysis_url
+        $query_info.detection_type[0] = $response.result.family_name
+    }
+    
+    WriteCSV $query_info
+}
+
+
+function Kaspersky-Check($query_info) {
+    $query_info.platform = 'Kaspersky'
+    $kaspersky_body.request = $query_info.query
+    
+    $response = API-Request($query_info)
+    if(!$response) {
+        return
+    }
+    
+    $query_info.link = ("https://opentip.kaspersky.com/" + $query_info.query)
+    $query_info.first_seen = $response.FileGeneralInfo.FirstSeen
+    $query_info.last_seen = $response.FileGeneralInfo.LastSeen
+    
+    foreach($sig in $sig_whitelist) {
+        if($response.FileGeneralInfo.Signer -contains $sig) {
+            $query_info.comments = $response.FileGeneralInfo.Signer
+        }
+    }
+
+    ForEach($detection in $response.DetectionsInfo) {
+        if($query_info.detection_type[0] -eq '-') {
+            $query_info.detection_type[0] = $detection.DetectionName
+        }
+        else {
+            [void]$query_info.detection_type.Add($detection.DetectionName)
+        }
+    }
+    
+    if($query_info.detection_type[0] -ne '-') {
+        $query_info.reports = 100
+    }
+
+    if($response.Zone -eq 'Red') {
+        $query_info.rating = 'Malicious'
+    }
+    elseif($response.Zone -eq 'Green') {
+        $query_info.rating = 'Clean'
+        OutputHandler $query_info 2
+        Fallback-Platform $query_info
+        return
+    }
+    elseif($response.Zone -eq 'Grey') {
+        $query_info.rating = 'Unknown'
+        OutputHandler $query_info 2
+        Fallback-Platform $query_info
+        return
+    }
+    else {
+        $query_info.rating = $response.FileGeneralInfo.FileStatus
+    }
+    
+    WriteCSV $query_info
+}
+
+
+function AbuseIPDB-Check($query_info) {
+    $query_info.platform = 'AbuseIPDB'
+    $count_comments = 0
+    $comment = '-'
+    $abuseipdb_body.ipAddress = $query_info.query
+
+    $response = API-Request($query_info)
+    if(!$response) {
+        return
+    }
+
+    $whitelisted = $response.data.isWhitelisted
+    $confidence_score = $response.data.abuseConfidenceScore
+    $total_reports = $response.data.totalReports
+    $query_info.last_seen = $response.data.lastReportedAt
+    $isp = $response.data.isp
+    $domain = $response.data.domain
+    $usage_type = $response.data.usageType
+    $query_info.link = "https://www.abuseipdb.com/check/$query"
+
+
+    if($total_reports -eq 0 -and $confidence_score -eq 0) {
+        $query_info.rating = 'Clean'
+        OutputHandler $query_info 2
+        Fallback-Platform $query_info
+        return
+    }
+    elseif($total_reports -le 3 -and $confidence_score -le 10) {
+        $query_info.rating = 'Suspicious'
+    }
+    elseif($total_reports -gt 3 -or $confidence_score -gt 10) {
+        $query_info.rating = 'Malicious'
+    }
+    else {
+        $query_info.rating = 'Unknown'
+        OutputHandler $query_info 2
+        Fallback-Platform $query_info
+        return
+    }
+
+    ForEach($report in $response.data.reports) {
+        if($count_comments -ge $abuseipdb_max_comments) {
+            continue
+        }
+        $query_info.comments += ($report.comment + "`n")
+        $count_comments += 1
+    }
+
+    WriteCSV $query_info
 }
 
 
 function VirusTotal-Check($query_info) {
     $query_info.platform = 'VirusTotal'
-    $query_info.link = "https://www.virustotal.com/gui/file/$query"
     
-    try {
-        $response = Invoke-RestMethod -Uri ($virustotal_url + $virustotal_url_type.($query_info.ioc_type) + $query_info.query) -Headers $virustotal_headers
-        
-        $count_malicious = $response.data.attributes.last_analysis_stats.malicious
-        $count_suspicious = $response.data.attributes.last_analysis_stats.suspicious
-        $query_info.file_name = $response.data.attributes.meaningful_name
-        $sig_info = $response.data.attributes.signature_info
-        $query_info.reports = $count_malicious + $count_suspicious
+    $response = API-Request($query_info)
+    if(!$response) {
+        return
+    }
 
-        if(![string]::IsNullOrWhitespace($response.data.attributes.first_submission_date)) {
-            $query_info.first_seen = [timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($response.data.attributes.first_submission_date))
-        }
-        if(![string]::IsNullOrWhitespace($response.data.attributes.last_analysis_date)) {
-            $query_info.last_seen = [timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($response.data.attributes.last_analysis_date))
-        }
+    $count_malicious = $response.data.attributes.last_analysis_stats.malicious
+    $count_suspicious = $response.data.attributes.last_analysis_stats.suspicious
+    $query_info.file_name = $response.data.attributes.meaningful_name
+    $sig_info = $response.data.attributes.signature_info
+    $query_info.reports = $count_malicious + $count_suspicious
+    $query_info.link = ("https://www.virustotal.com/gui/file/" + $query_info.query)
 
-        ForEach($analysis in $response.data.attributes.last_analysis_results) {
-            $analysis | Get-Member -MemberType NoteProperty | ForEach-Object {
-                $key = $_.Name
-                if($analysis.$key.category -eq 'malicious' -or $analysis.$key.category -eq 'suspicious') {
-                    if($query_info.detection_type[0] -eq '-') {
-                        $query_info.detection_type[0] = ($key + ":" + $analysis.$key.result)
-                    }
-                    else {
-                        [void]$query_info.detection_type.Add($key + ":" + $analysis.$key.result)
-                    }
+
+    if(![string]::IsNullOrWhitespace($response.data.attributes.first_submission_date)) {
+        $query_info.first_seen = [timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($response.data.attributes.first_submission_date))
+    }
+    if(![string]::IsNullOrWhitespace($response.data.attributes.last_analysis_date)) {
+        $query_info.last_seen = [timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($response.data.attributes.last_analysis_date))
+    }
+
+    ForEach($analysis in $response.data.attributes.last_analysis_results) {
+        $analysis | Get-Member -MemberType NoteProperty | ForEach-Object {
+            $key = $_.Name
+            if($analysis.$key.category -eq 'malicious' -or $analysis.$key.category -eq 'suspicious') {
+                if($query_info.detection_type[0] -eq '-') {
+                    $query_info.detection_type[0] = ($key + ":" + $analysis.$key.result)
+                }
+                else {
+                    [void]$query_info.detection_type.Add($key + ":" + $analysis.$key.result)
                 }
             }
         }
-
-        if($query_info.reports -ge 3) {
-            $query_info.rating = "Malicious"
-        }
-        elseif($query_info.reports -ge 1) {
-            $query_info.rating = "Suspicious"
-        }
-        elseif($query_info.reports -eq 0) {
-            $query_info.rating = "Clean"
-            OutputHandler $query_info 2
-            Fallback-Platform $query_info
-            return
-        }
-        else {
-            $query_info.rating = "Unknown"
-            OutputHandler $query_info 2
-            Fallback-Platform $query_info
-            return
-        }
-
-        
-        if($sig_info.copyright -eq "© Microsoft Corporation. All rights reserved.") {
-                $query_info.comments = "Microsoft Corporation. All rights reserved"
-        }
-
-        WriteCSV $query_info
     }
-    catch {
-        if($_.Exception.Response.StatusCode.Value__ -eq 404) {
-            OutputHandler ("[!] [VirusTotal] [" + $query_info.ioc_type + "] Not Found [!] : " + $query_info.query)
-        }
-        elseif($_.Exception.Response.StatusCode.Value__ -eq 429) {
-            OutputHandler ("[!] [VirusTotal] [" + $query_info.ioc_type + "] Quota Exceeded, toggling keys... [!] : " + $query_info.query)
-            if((API-Toggle 1)) {
-                VirusTotal-Check $query_info
-                return
-            }
-        }
-        else {
-            OutputHandler ("[!] [VirusTotal] Error " + $_.Exception.Response.StatusCode.Value__ + " [!] : " + $query_info.query)
-            OutputHandler $_
-        }
 
+    foreach($sig in $sig_whitelist) {
+        if($sig_info.copyright -contains $sig) {
+            $query_info.comments = $sig_info.copyright
+        }
+    }
+
+    if($query_info.reports -ge 3) {
+        $query_info.rating = "Malicious"
+    }
+    elseif($query_info.reports -ge 1) {
+        $query_info.rating = "Suspicious"
+    }
+    elseif($query_info.reports -eq 0) {
+        $query_info.rating = "Clean"
+        OutputHandler $query_info 2
         Fallback-Platform $query_info
-    }   
+        
+        return
+    }
+    else {
+        $query_info.rating = "Unknown"
+        OutputHandler $query_info 2
+        Fallback-Platform $query_info
+        return
+    }    
+
+    WriteCSV $query_info
 }
 
 
@@ -461,10 +573,6 @@ function QueryVerify($raw_query, $query_info) {
         foreach($word in $filter_words) {
             $filtered_query = $filtered_query.Replace($word, '')
         }
-        
-        foreach($char in $split_chars) {
-            $filtered_query = $filtered_query.split($char)[0]
-        }
 
         if($filtered_query -match $regex_ipv4) {
             $query_info.ioc_type = 'ip'
@@ -474,7 +582,6 @@ function QueryVerify($raw_query, $query_info) {
         }
         elseif($filtered_query -match $regex_hash) {
             $query_info.ioc_type = 'hash'
-            
             if($filtered_query -match $regex_sha1) {
                 $query_info.hash_type = ':Sha1'
                 $query_info.sha1 = $true
@@ -491,8 +598,8 @@ function QueryVerify($raw_query, $query_info) {
         else {
             $query_info.query = $raw_query
             $query_info.comments = "Invalid IOC"
+            OutputHandler ("[?] Invalid IOC: $raw_query (Filtered:$filtered_query)")
             WriteCSV $query_info $false
-            OutputHandler $query_info 4
             return $false
         }
         $filtered_query = $Matches[0]
@@ -530,6 +637,7 @@ Get-Content $ioc_file | ForEach-Object {
     
     switch ($debug_platform) {
         2 { Kaspersky-Check $query_info; break }
+        3 { Intezer-Check $query_info; break }
         4 { AbuseIPDB-Check $query_info; break }
         Default { VirusTotal-Check $query_info }
     }

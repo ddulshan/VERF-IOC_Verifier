@@ -1,3 +1,11 @@
+## 1.1
+- Added new service support - Intezer
+- Regex optimizations
+- Improved exception handling
+- Kaspersky IP/Domain detection fix
+- Rate limiter added
+- Connection error handling
+
 ## 1.0
 - Script got a new name, “VERF”!
 - IOC Filtering – Script is now able to isolate IOCs from URLs and other unrelated texts from same line.
