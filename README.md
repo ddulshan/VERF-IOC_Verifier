@@ -1,3 +1,4 @@
+<head><meta name="google-site-verification" content="mTuEBDhSLyVvZFhOsDOFNbL2mVfNEY7UxLkN3xUTGeY" /></head>
 <h1 align="center">VERF</h1>
 <h3 align="center">Powershell based IOC Verifier</h3>
 
