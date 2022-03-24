@@ -1,5 +1,3 @@
-<h1 align="center">VERF</h1>
-<h3 align="center">Powershell based IOC Verifier</h3>
 
 ## About
 Powershell based script to call upon APIs of Malware databases to verify the nature of given Indicators of Compromise(IOCs). Supported IOCs(See: [Additional Info](#iocs--filtering)):
