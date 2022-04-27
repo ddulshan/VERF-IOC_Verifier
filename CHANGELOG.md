@@ -1,3 +1,7 @@
+## 1.2
+- Additional IOC details in report
+- Minor bug fixes
+
 ## 1.1
 - Added new service support - Intezer
 - Regex optimizations

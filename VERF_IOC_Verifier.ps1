@@ -1,6 +1,6 @@
 ﻿<#
     VERF - IOC Verifier
-    Version : 1.1
+    Version : 1.2
     Creator : Dunura Dulshan | | https://github.com/ddulshan
     Description : Script to call Malware databases such as VirusTotal, Kaspersky and AbuseIPDB API for information on given query
 #>
@@ -12,7 +12,7 @@ $debug_platform = 0 #0-debug off, 1-VT, 2-Kasper, 3-Intezer, 4-AbuseIPDB
 $abuseipdb_max_comments = 8
 $temp_cache_check = $true
 $api_rate_limit = $false
-$virustotal_timeout = 17
+$virustotal_timeout = 17 #For VirusTotal query limit. 4/minute, 500/day
 $filter_words = @('www.', '[', ']', 'http://', 'https://', 'hxxp://', 'hxxps://')
 
 <# API KEYS
@@ -94,9 +94,17 @@ class query_class {
     $md5 = '-'
     $sha1 = '-'
     $sha256 = '-'
+    $ipDomain_info = @{}
+
 
     query_class () {
         $this.detection_type.Add('-')
+
+        $this.ipDomain_info.Add('domain', '-')
+        $this.ipDomain_info.Add('isp', '-')
+        $this.ipDomain_info.Add('usage', '-')
+        $this.ipDomain_info.Add('country', '-')
+        $this.ipDomain_info.Add('hostnames', '-')
     }
 }
 
@@ -149,15 +157,20 @@ function WriteCSV($query_info, $verbose = $true) {
         'Query' = $query_info.query
         'File Name' = $query_info.file_name
         'Rating' = $query_info.rating
-        'Comments' = $query_info.comments
         'Reports' = $query_info.reports
-        'Detection Type' = $detection_type_str
-        'First Seen' = $query_info.first_seen
-        'Last Seen' = $query_info.last_seen
-        'Link' = $query_info.link
+        'Comments' = $query_info.comments
         'MD5' = $query_info.md5
         'SHA-1' = $query_info.sha1
         'SHA-256' = $query_info.sha256
+        'Detection Type' = $detection_type_str
+        'Domain' = $query_info.ipDomain_info.domain
+        'ISP' = $query_info.ipDomain_info.isp
+        'Usage Type' = $query_info.ipDomain_info.usage
+        'Country' = $query_info.ipDomain_info.country
+        'Hostnames' = ($query_info.ipDomain_info.hostnames).ToString()   
+        'First Seen' = $query_info.first_seen
+        'Last Seen' = $query_info.last_seen
+        'Link' = $query_info.link
     }
     
     if (!(Test-Path ".\Reports" -PathType Container)) {
@@ -384,6 +397,10 @@ function Intezer-Check($query_info) {
         $query_info.detection_type[0] = $response.result.family_name
     }
     
+    if($query_info.ioc_type -eq 'ip' -or $query_info.ioc_type -eq 'domain') {
+        AbuseIPDB-Check $query_info $true
+    }
+
     WriteCSV $query_info
 }
 
@@ -439,11 +456,15 @@ function Kaspersky-Check($query_info) {
         $query_info.rating = $response.FileGeneralInfo.FileStatus
     }
     
+    if($query_info.ioc_type -eq 'ip' -or $query_info.ioc_type -eq 'domain') {
+        AbuseIPDB-Check $query_info $true
+    }
+
     WriteCSV $query_info
 }
 
 
-function AbuseIPDB-Check($query_info) {
+function AbuseIPDB-Check($query_info, $ipDomainInfo = $false) {
     $query_info.platform = 'AbuseIPDB'
     $count_comments = 0
     $comment = '-'
@@ -451,6 +472,24 @@ function AbuseIPDB-Check($query_info) {
 
     $response = API-Request($query_info)
     if(!$response) {
+        return
+    }
+
+    $query_info.ipDomain_info.domain = $response.data.domain
+    $query_info.ipDomain_info.isp = $response.data.isp
+    $query_info.ipDomain_info.usage = $response.data.usageType
+    $query_info.ipDomain_info.country = $response.data.countryName
+
+    ForEach($hostname in $response.data.hostnames) {
+        if($query_info.ipDomain_info.hostnames -eq '-') {
+            $query_info.ipDomain_info.hostnames = $hostname.ToString()
+        }
+        else {
+            $query_info.ipDomain_info.hostnames += (", " + $hostname)
+        }
+    }
+
+    if($ipDomainInfo) {
         return
     }
 
@@ -462,7 +501,6 @@ function AbuseIPDB-Check($query_info) {
     $domain = $response.data.domain
     $usage_type = $response.data.usageType
     $query_info.link = "https://www.abuseipdb.com/check/$query"
-
 
     if($total_reports -eq 0 -and $confidence_score -eq 0) {
         $query_info.rating = 'Clean'
@@ -510,6 +548,17 @@ function VirusTotal-Check($query_info) {
     $query_info.reports = $count_malicious + $count_suspicious
     $query_info.link = ("https://www.virustotal.com/gui/file/" + $query_info.query)
 
+    if($query_info.ioc_type -eq 'hash') {
+        if($query_info.md5 -ne $true) {
+            $query_info.md5 = $response.data.attributes.md5
+        }
+        if($query_info.sha1 -ne $true) {
+            $query_info.sha1 = $response.data.attributes.sha1
+        }
+        if($query_info.sha256 -ne $true) {
+            $query_info.sha256 = $response.data.attributes.sha256
+        }
+    }
 
     if(![string]::IsNullOrWhitespace($response.data.attributes.first_submission_date)) {
         $query_info.first_seen = [timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($response.data.attributes.first_submission_date))
@@ -557,6 +606,10 @@ function VirusTotal-Check($query_info) {
         Fallback-Platform $query_info
         return
     }    
+
+    if($query_info.ioc_type -eq 'ip' -or $query_info.ioc_type -eq 'domain') {
+        AbuseIPDB-Check $query_info $true
+    }
 
     WriteCSV $query_info
 }
