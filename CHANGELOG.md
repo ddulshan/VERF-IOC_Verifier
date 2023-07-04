@@ -1,3 +1,7 @@
+## 1.3
+- Report Improvements
+- Bug fixes
+
 ## 1.2
 - Additional IOC details in report
 - Minor bug fixes
