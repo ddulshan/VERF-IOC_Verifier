@@ -1,8 +1,10 @@
-﻿<#
+<#
     VERF - IOC Verifier
-    Version : 1.2
+    Version : 1.3
     Creator : Dunura Dulshan | | https://github.com/ddulshan
     Description : Script to call Malware databases such as VirusTotal, Kaspersky and AbuseIPDB API for information on given query
+    
+
 #>
 
 # Configurable Settings
@@ -10,7 +12,7 @@ $ioc_file = '.\ioc.txt'
 $temp_cache_file = '.\VERF_Temp_Cache'
 $debug_platform = 0 #0-debug off, 1-VT, 2-Kasper, 3-Intezer, 4-AbuseIPDB
 $abuseipdb_max_comments = 8
-$temp_cache_check = $true
+$temp_cache_check = $true #Caches check values, allowes skipping duplicates and resume capability if interrupted
 $api_rate_limit = $false
 $virustotal_timeout = 17 #For VirusTotal query limit. 4/minute, 500/day
 $filter_words = @('www.', '[', ']', 'http://', 'https://', 'hxxp://', 'hxxps://')
@@ -42,7 +44,9 @@ $global:virustotal_current_key = 0
 $global:kaspersky_current_key = 0
 $global:absueipdb_current_key = 0
 $global:intezer_current_key = 0
+
 $global:current_filename = ''
+
 $virustotal_key_exhausted = $false
 $kaspersky_key_exhausted = $false
 $intezer_key_exhausted = $false
@@ -133,27 +137,22 @@ $kaspersky_body = @{
     'request' = ""
 }
 $intezer_body = @{
-    'api_key' = ''+$intezer_keys[$intezer_current_key]
+    'api_key' = $intezer_keys[$intezer_current_key]
 }
 
-
 # Regex for IOC identification
-[regex]$regex_ipv4 = '\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
-[regex]$regex_sha1 = '\b([a-f0-9]{40})\b'
-[regex]$regex_sha256 = '\b[a-f0-9]{64}\b'
-[regex]$regex_md5 = '\b[0-9a-fA-F]{32}\b'
-[regex]$regex_domain = '([a-z0-9-]+\.)*[a-z0-9-]+\.[a-z]+'
+[regex]$regex_ipv4 = '\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\b|$)'
+[regex]$regex_sha1 = '\b([a-fA-F0-9]{40})(\b|$)'
+[regex]$regex_sha256 = '\b[a-fA-F0-9]{64}(\b|$)'
+[regex]$regex_md5 = '\b[0-9a-fA-F]{32}(\b|$)'
+[regex]$regex_domain = '\b([a-zA-Z0-9-]+\.)*[a-zA-Z0-9-]+\.[a-zA-Z0-9-]+(\b|$)'
 [regex]$regex_selectURL = '^(\/(.*))'
-[regex]$regex_hash = '((?<!FIRSTBYTES:\s)|[\b\s]|^)([0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})(\b|$)'
+[regex]$regex_hash = '\b([0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})(\b|$)'
 
 
 function WriteCSV($query_info, $verbose = $true) {
-
-    ForEach($type in $query_info.detection_type) {
-        $detection_type_str += ("$type`n")
-    }
-    
     $csv = [pscustomobject]@{
+        'Type' = $query_info.ioc_type
         'Query' = $query_info.query
         'File Name' = $query_info.file_name
         'Rating' = $query_info.rating
@@ -162,17 +161,17 @@ function WriteCSV($query_info, $verbose = $true) {
         'MD5' = $query_info.md5
         'SHA-1' = $query_info.sha1
         'SHA-256' = $query_info.sha256
-        'Detection Type' = $detection_type_str
+        'Detection Type' = ($query_info.detection_type -join ',')
         'Domain' = $query_info.ipDomain_info.domain
-        'ISP' = $query_info.ipDomain_info.isp
+        'ISP/Registar' = $query_info.ipDomain_info.isp
         'Usage Type' = $query_info.ipDomain_info.usage
         'Country' = $query_info.ipDomain_info.country
-        'Hostnames' = ($query_info.ipDomain_info.hostnames).ToString()   
+        'Hostnames' = $query_info.ipDomain_info.hostnames  
         'First Seen' = $query_info.first_seen
         'Last Seen' = $query_info.last_seen
         'Link' = $query_info.link
     }
-    
+
     if (!(Test-Path ".\Reports" -PathType Container)) {
         [void](New-Item -ItemType Directory -Force -Path ".\Reports")
     }
@@ -190,9 +189,7 @@ function WriteCSV($query_info, $verbose = $true) {
     }
     Write-Host ''
     
-    if($temp_cache_check) {
-        Add-Content -Path $temp_cache_file -Value $query_info.query
-    }
+    AddToTempCache($query_info.query)
 }
 
 
@@ -337,6 +334,9 @@ function API-Request($query_info) {
                 }
                 $response = Invoke-RestMethod -Uri $abuseipdb_url -Body $abuseipdb_body -Headers $abuseipdb_headers
             }
+            elseif ($platform -eq 5) {
+                $response = Invoke-RestMethod -Uri $whoisxmlapi_url -Body $whoisxmlapi_body
+            }
 
             return $response
         }
@@ -397,7 +397,7 @@ function Intezer-Check($query_info) {
         $query_info.detection_type[0] = $response.result.family_name
     }
     
-    if($query_info.ioc_type -eq 'ip' -or $query_info.ioc_type -eq 'domain') {
+    if($query_info.ioc_type -eq 'ip') {
         AbuseIPDB-Check $query_info $true
     }
 
@@ -456,7 +456,7 @@ function Kaspersky-Check($query_info) {
         $query_info.rating = $response.FileGeneralInfo.FileStatus
     }
     
-    if($query_info.ioc_type -eq 'ip' -or $query_info.ioc_type -eq 'domain') {
+    if($query_info.ioc_type -eq 'ip') {
         AbuseIPDB-Check $query_info $true
     }
 
@@ -533,6 +533,23 @@ function AbuseIPDB-Check($query_info, $ipDomainInfo = $false) {
 }
 
 
+function WhoIs-Check($query_info) {
+    $query_info.platform = 'WhoIs'
+    $response = API-Request($query_info)
+    
+    
+}
+
+
+function NullCheck($var) {
+    if($var -eq $null) {
+        return '-'
+    }
+    else {
+        return $var
+    }
+}
+
 function VirusTotal-Check($query_info) {
     $query_info.platform = 'VirusTotal'
     
@@ -540,31 +557,61 @@ function VirusTotal-Check($query_info) {
     if(!$response) {
         return
     }
-
     $count_malicious = $response.data.attributes.last_analysis_stats.malicious
     $count_suspicious = $response.data.attributes.last_analysis_stats.suspicious
-    $query_info.file_name = $response.data.attributes.meaningful_name
-    $sig_info = $response.data.attributes.signature_info
     $query_info.reports = $count_malicious + $count_suspicious
     $query_info.link = ("https://www.virustotal.com/gui/file/" + $query_info.query)
 
     if($query_info.ioc_type -eq 'hash') {
+        $query_info.file_name = $response.data.attributes.meaningful_name
+        $sig_info = $response.data.attributes.signature_info
+
         if($query_info.md5 -ne $true) {
             $query_info.md5 = $response.data.attributes.md5
+            AddToTempCache($query_info.md5)
         }
         if($query_info.sha1 -ne $true) {
             $query_info.sha1 = $response.data.attributes.sha1
+            AddToTempCache($query_info.sha1)
         }
         if($query_info.sha256 -ne $true) {
             $query_info.sha256 = $response.data.attributes.sha256
+            AddToTempCache($query_info.sha256)
+        }
+    }
+
+    if($query_info.ioc_type -eq 'domain') {
+        $query_info.first_seen = TimeConverter(NullCheck($response.data.attributes.creation_date))
+        $query_info.last_seen = TimeConverter(NullCheck($response.data.attributes.last_dns_records_date))
+
+        if($response.data.attributes.whois -ne $null) {
+            $whois = $response.data.attributes.whois            
+            $query_info.ipDomain_info.country = ($whois -match 'Registrant country: (.*)') | % {try{$Matches[1]}catch{'-'}}
+            $query_info.ipDomain_info.hostnames = ($whois -match 'Name server(?:\s\d:|:) (.*)') | % {try{$Matches[1]}catch{'-'}} 
+            $query_info.ipDomain_info.domain = ($whois -match 'Domain Name: (.*)') | % {try{$Matches[1]}catch{'-'}}
+            $query_info.ipDomain_info.isp = NullCheck($response.data.attributes.registrar)
+        }
+
+        $categories = $response.data.attributes.categories
+
+        if($categories -ne $null) {
+            $query_info.ipDomain_info.usage = ''
+        }
+        else {
+            return
+        }
+
+        $categories | Get-Member -MemberType NoteProperty | ForEach-Object {
+            $key = $_.Name
+            $query_info.ipDomain_info.usage += $key + " : " + $categories.$key + ", "
         }
     }
 
     if(![string]::IsNullOrWhitespace($response.data.attributes.first_submission_date)) {
-        $query_info.first_seen = [timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($response.data.attributes.first_submission_date))
+        $query_info.first_seen = TimeConverter($response.data.attributes.first_submission_date)
     }
     if(![string]::IsNullOrWhitespace($response.data.attributes.last_analysis_date)) {
-        $query_info.last_seen = [timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($response.data.attributes.last_analysis_date))
+        $query_info.last_seen = TimeConverter($response.data.attributes.last_analysis_date)
     }
 
     ForEach($analysis in $response.data.attributes.last_analysis_results) {
@@ -579,6 +626,9 @@ function VirusTotal-Check($query_info) {
                 }
             }
         }
+    }
+    if($response.data.attributes.trusted_verdict) {
+        $query_info.comments = ($response.data.attributes.trusted_verdict.verdict + " by " + $response.data.attributes.trusted_verdict.organization)
     }
 
     foreach($sig in $sig_whitelist) {
@@ -607,13 +657,11 @@ function VirusTotal-Check($query_info) {
         return
     }    
 
-    if($query_info.ioc_type -eq 'ip' -or $query_info.ioc_type -eq 'domain') {
+    if($query_info.ioc_type -eq 'ip') {
         AbuseIPDB-Check $query_info $true
     }
-
     WriteCSV $query_info
 }
-
 
 function QueryVerify($raw_query, $query_info) {
     $filtered_query = ''
@@ -624,7 +672,7 @@ function QueryVerify($raw_query, $query_info) {
     else {
         $filtered_query = $raw_query
         foreach($word in $filter_words) {
-            $filtered_query = $filtered_query.Replace($word, '')
+            $filtered_query = $filtered_query -ireplace [regex]::Escape($word), ''
         }
 
         if($filtered_query -match $regex_ipv4) {
@@ -661,6 +709,7 @@ function QueryVerify($raw_query, $query_info) {
             if(Test-Path -Path $temp_cache_file -PathType Leaf) {
                 Get-Content $temp_cache_file | ForEach-Object {
                     if($_ -eq $filtered_query) {
+                        OutputHandler("[!] Skipping (In Cache): $filtered_query`n")
                         return $false
                     }
                 }
@@ -671,23 +720,56 @@ function QueryVerify($raw_query, $query_info) {
     }
 }
 
-Write-Host ''
-Write-Host "##################################################################";Write-Host ''
-Write-Host "             V E R F   -    I O C   V E R I F I E R               ";Write-Host ''
-Write-Host "##################################################################";Write-Host ''
 
-if(!(Test-Path -Path $ioc_file -PathType Leaf)) {
-    OutputHandler "[?] IOC File does not exist. Please create file `"$ioc_file`" with IOCs"
-    return
+function TimeConverter($seconds) {
+    try {
+        return ([timezone]::CurrentTimeZone.ToLocalTime(([datetime]'1/1/1970').AddSeconds($seconds)))
+    }
+    catch {
+        return '-'
+    }
+    
 }
+
+function InitialChecks() {
+    if(!(Test-Path -Path $ioc_file -PathType Leaf)) {
+        OutputHandler "[?] IOC File : IOC File does not exist. Please create file `"$ioc_file`" with IOCs"
+        return
+    }
+
+    if(!$virustotal_keys -and !$kaspersky_keys -and !$intezer_keys -and !$abuseipdb_keys) {
+        OutputHandler "[?] API Keys : No API keys found! Exiting."
+        break
+    }
+}
+
+
+function AddToTempCache($query) {
+    Add-Content -Path $temp_cache_file -Value $query
+}
+
+
+Write-Host ''
+Write-Host "#####################################################################";
+Write-Host "             
+██╗░░░██╗  ███████╗  ██████╗░  ███████╗
+██║░░░██║  ██╔════╝  ██╔══██╗  ██╔════╝
+╚██╗░██╔╝  █████╗░░  ██████╔╝  █████╗░░
+░╚████╔╝░  ██╔══╝░░  ██╔══██╗  ██╔══╝░░
+░░╚██╔╝░░  ███████╗  ██║░░██║  ██║░░░░░
+░░░╚═╝░░░  ╚══════╝  ╚═╝░░╚═╝  ╚═╝░░░░░   I O C   V E R I F I E R               ";
+Write-Host "`nv1.3`n"
+Write-Host "#####################################################################";Write-Host ''
+
+InitialChecks
+
 
 Get-Content $ioc_file | ForEach-Object {
     $query_info = [query_class]::new()
-    
     if((QueryVerify $_ $query_info) -eq $false) {
         return
     }
-    
+
     switch ($debug_platform) {
         2 { Kaspersky-Check $query_info; break }
         3 { Intezer-Check $query_info; break }
